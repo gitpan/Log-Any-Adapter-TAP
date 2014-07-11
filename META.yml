@@ -1,0 +1,27 @@
+---
+abstract: 'Logger suitable for use with TAP test files'
+author:
+  - 'Michael Conrad <mike@nrdvana.net>'
+build_requires:
+  Log::Any: 0
+  Test::More: 0
+configure_requires:
+  ExtUtils::MakeMaker: 6.30
+dynamic_config: 0
+generated_by: 'Dist::Zilla version 5.015, CPAN::Meta::Converter version 2.141170'
+license: perl
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.4.html
+  version: 1.4
+name: Log-Any-Adapter-TAP
+requires:
+  Carp: 0
+  Data::Dumper: 0
+  Log::Any::Adapter: 0
+  Log::Any::Adapter::Base: 0
+  Scalar::Util: 0
+  Try::Tiny: 0
+  parent: 0
+  strict: 0
+  warnings: 0
+version: 0.001000
