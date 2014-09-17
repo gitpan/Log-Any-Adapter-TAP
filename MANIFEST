@@ -10,5 +10,6 @@ lib/Log/Any/Adapter/TAP.pm
 t/01-basics.t
 t/02-tap_log_filter-env.t
 t/03-invalid_log_level.t
+t/04-filter-offset-notation.t
 t/release-pod-coverage.t
 t/release-pod-syntax.t
