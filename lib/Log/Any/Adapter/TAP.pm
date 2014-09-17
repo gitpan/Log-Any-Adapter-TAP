@@ -23,8 +23,9 @@ our %level_map;              # mapping from level name to numeric level
 sub _coerce_filter_level {
 	my $val= shift;
 	return (!defined $val || $val eq 'none')? $level_map{trace}-1
+		: ($val eq 'all')? $level_map{emergency}
 		: exists $level_map{$val}? $level_map{$val}
-		: ($val =~ /^([A-Za-z]+)[-+]([0-9]+)$/) && defined $level_map{lc $1}? $level_map{lc $1} - $2
+		: ($val =~ /^([A-Za-z]+)([-+][0-9]+)$/) && defined $level_map{lc $1}? $level_map{lc $1} + $2
 		: croak "unknown log level '$val'";
 }
 
@@ -65,10 +66,12 @@ BEGIN {
 		for (split /,/, $ENV{TAP_LOG_FILTER}) {
 			if (index($_, '=') > -1) {
 				my ($pkg, $level)= split /=/, $_;
-				$category_filter_level{$pkg}= &_coerce_filter_level($level);
+				eval { $category_filter_level{$pkg}= _coerce_filter_level($level); 1; }
+					or warn "$@";
 			}
 			else {
-				$global_filter_level= &_coerce_filter_level($_);
+				eval { $global_filter_level= _coerce_filter_level($_); 1; }
+					or warn "$@";
 			}
 		}
 	}
@@ -96,14 +99,16 @@ sub category { $_[0]{category} }
 
 sub init {
 	my $self= shift;
-	$self->{filter}= exists $self->{filter}? _coerce_filter_level($self->{filter})
+	my $level= exists $self->{filter}? _coerce_filter_level($self->{filter})
 		: defined $category_filter_level{$self->{category}}? $category_filter_level{$self->{category}}
 		: $global_filter_level;
+	$level= $level_map{emergency} if $level > $level_map{emergency};
 	# Rebless to a "level filter" package, which is a subclass of this one
 	# but with some methods replaced by empty subs.
 	# If log level is negative (trace), we show all messages, so no need to rebless.
-	bless $self, ref($self).'::Lev'.($self->{filter}+1)
-		if $self->{filter} >= -1;
+	my $pkg_id= $level+1;
+	bless $self, ref($self)."::Lev$pkg_id"
+		if $pkg_id >= 0;
 	
 	# As a courtesy to people running "prove -v", we show a quick usage for env
 	# vars that affect logging output.  This can be suppressed by either
@@ -153,6 +158,7 @@ sub _default_dumper {
 	};
 }
 
+
 # Programmatically generate all the info, infof, is_info ... methods
 sub _build_logging_methods {
 	my $class= shift;
@@ -160,24 +166,33 @@ sub _build_logging_methods {
 	# We implement the stock methods, but also 'fatal' because in my mind, fatal is not
 	# an alias for 'critical' and I want to see a prefix of "fatal" on messages.
 	for my $method ( grep { !$seen{$_}++ } Log::Any->logging_methods(), 'fatal' ) {
-		my $impl= ($level_map{$method} >= $level_map{info})
+		my ($impl, $printfn);
+		if ($level_map{$method} >= $level_map{info}) {
 			# Standard logging.  Concatenate everything as a string.
-			? sub {
+			$impl= sub {
 				(shift)->write_msg($method, join('', map { !defined $_? '<undef>' : $_ } @_));
-			}
-			# Debug and trace logging.  For these, we trap exceptions and dump data structures
-			: sub {
-				my $self= shift;
-				local $@;
-				eval { $self->write_msg($method, join('', map { !defined $_? '<undef>' : !ref $_? $_ : $self->dumper->($_) } @_)); };
 			};
-		my $printfn=
 			# Formatted logging.  We dump data structures (because Log::Any says to)
-			sub {
+			$printfn= sub {
 				my $self= shift;
 				$self->write_msg($method, sprintf((shift), map { !defined $_? '<undef>' : !ref $_? $_ : $self->dumper->($_) } @_));
 			};
-		
+		} else {
+			# Debug and trace logging.  For these, we trap exceptions and dump data structures
+			$impl= sub {
+				my $self= shift;
+				local $@;
+				eval { $self->write_msg($method, join('', map { !defined $_? '<undef>' : !ref $_? $_ : $self->dumper->($_) } @_)); 1 }
+					or $self->warn("$@");
+			};
+			$printfn= sub {
+				my $self= shift;
+				local $@;
+				eval { $self->write_msg($method, sprintf((shift), map { !defined $_? '<undef>' : !ref $_? $_ : $self->dumper->($_) } @_)); 1; }
+					or $self->warn("$@");
+			};
+		}
+			
 		# Install methods in base package
 		no strict 'refs';
 		*{"${class}::$method"}= $impl;
@@ -203,7 +218,7 @@ sub _build_filtered_subclasses {
 		for values %level_map;
 	
 	# Create packages, inheriting from $class
-	for (0..$max_level) {
+	for (0..$max_level+1) {
 		no strict 'refs';
 		push @{"${class}::Lev${_}::ISA"}, $class;
 	}
@@ -211,7 +226,7 @@ sub _build_filtered_subclasses {
 	for my $method (keys %level_map) {
 		my $level= $level_map{$method};
 		# Suppress methods in all higher filtering level packages
-		for ($level+1 .. $max_level) {
+		for ($level+1 .. $max_level+1) {
 			no strict 'refs';
 			*{"${class}::Lev${_}::$method"}= sub {};
 			*{"${class}::Lev${_}::${method}f"}= sub {};
@@ -239,7 +254,7 @@ Log::Any::Adapter::TAP - Logging adapter suitable for use in TAP testcases
 
 =head1 VERSION
 
-version 0.002000_00
+version 0.002000_01
 
 =head1 DESCRIPTION
 
@@ -256,33 +271,31 @@ at the start of your testcase, and now you have your logging output as
 part of your TAP stream.
 
 By default, C<debug> and C<trace> are suppressed, but you can enable
-them with C<TAP_LOG_FILTER>.  See below.
+them with L</TAP_LOG_FILTER>.  See below.
 
 =head1 ENVIRONMENT
 
-=head2 ENV{TAP_LOG_FILTER}
+=head2 TAP_LOG_FILTER
 
-Specify the lowest log level which should be suppressed.  The default is
-C<debug>, which suppresses C<debug> and C<trace> messages.
-A value of "none" enables all logging levels.
+Specify the default filter value.  See attribute L</filter> for details.
 
-If you want to affect specific logging categories use a notation like
+You may also specify defaults per-category, using this syntax:
+
+  $default_level,$package_1=$level,...,$package_n=$level
+
+So, for example:
 
   TAP_LOG_FILTER=trace,MyPackage=none,NoisyPackage=warn prove -lv
 
-The filter level may end with a "+N" or "-N" indicating an offset from
-the named level, so C<debug-1> is equivalent to C<trace> and C<debug+1>
-is equivalent to C<info>.
-
-=head2 ENV{TAP_LOG_ORIGIN}
+=head2 TAP_LOG_ORIGIN
 
 Set this variable to 1 to show which category the message came from,
 or 2 to see the file and line number it came from, or 3 to see both.
 
-=head2 ENV{TAP_LOG_SHOW_USAGE}
+=head2 TAP_LOG_SHOW_USAGE
 
-Defaults to true, which prints a #note on stdout describing these
-environment variables when Log::Any::Adapter::TAP is first loaded.
+Defaults to true, which prints a TAP comment briefing the user about
+these environment variables when Log::Any::Adapter::TAP is first loaded.
 
 Set TAP_LOG_SHOW_USAGE=0 to suppress this message.
 
@@ -293,39 +306,46 @@ Set TAP_LOG_SHOW_USAGE=0 to suppress this message.
   use Log::Any::Adapter 'TAP', filter => 'info';
   use Log::Any::Adapter 'TAP', filter => 'debug+3';
 
-Messages equal to or less than the level of filter are suppressed.
+Messages with a log level equal to or less than the filter are suppressed.
 
-The default filter is 'debug', meaning C<debug> and C<trace> are suppressed.
+Defaults to L</TAP_LOG_FILTER> which defaults to C<debug>, which
+suppresses C<debug> and C<trace> messages.
 
-filter may be:
+Filter may be:
 
-=over 5
-
-=item *
-
-a level name like 'info', 'debug', etc, or a level alias as documented
-in Log::Any.
+=over
 
 =item *
 
-undef, or the string 'none', which do not suppress anything
+Any of the log level names or level aliases defined in L<Log::Any>.
 
 =item *
 
-a level name with a numeric offset, where a number will be added or
-subtracted from the log level.  Larger numbers are for more important
-levels, so C<debug+1> is equivalent to C<info>
+C<none> or C<undef>, to filters nothing (showing all logging levels).
+
+=item *
+
+A value of C<all>, to suppresses all logging (no messages are seen).
 
 =back
+
+The filter level may end with a C<+N> or C<-N> indicating an offset from
+the named level.  The numeric values increase with importance of the message,
+so C<debug-1> is equivalent to C<trace> and C<debug+1> is equivalent to C<info>.
+This differs from syslog, where increasing numbers are less important.
+(why did they choose that??)
 
 =head2 dumper
 
   use Log::Any::Adapter 'TAP', dumper => sub { my $val=shift; ... };
 
 Use a custom dumper function for converting perl data to strings.
-The dumper is only used for the "*f()" formatting functions, and for log
-levels 'debug' and 'trace'.  All normal logging will stringify the object
-in the normal way.
+The dumper is only used for the C<${level}f(...)> formatting functions,
+and for log levels C<debug> and C<trace>.
+All other logging will stringify the object in the normal way.
+
+Defaults to C<&Log::Any::Adapter::TAP::_default_dumper>, which (currently)
+calls Data::Dumper with a max depth of 4.  Do not depend on this default.
 
 =head1 METHODS
 
@@ -347,8 +367,27 @@ differently, or write to different file handles.
 
 This is a function which dumps a value in a human readable format.  Currently
 it uses Data::Dumper with a max depth of 4, but might change in the future.
+Do not depend on this output format; it is only for human consumption, and might
+change to a more friendly format in the future.
 
 This is the default value for the 'dumper' attribute.
+
+=head1 LOGGING_METHODS
+
+This module has all the standard L<Log::Any> methods.
+
+For regular logging functions (i.e. C<warn>, C<info>) the arguments are
+stringified and concatenated.  Errors during stringify or printing are not
+caught.
+
+For sprintf-like logging functions (i.e. C<warnf>, C<infof>) reference
+arguments are passed to C<$self-E<gt>dumper> before passing them to
+sprintf.  Errors are not caught here either.
+
+For any log level below C<info>, errors ARE caught with an C<eval> and printed
+as a warning.
+This is to prevent sloppy debugging code from ever crashing a production system.
+Also, references are passed to C<$self-E<gt>dumper> even for the regular methods.
 
 =head1 AUTHOR
 
